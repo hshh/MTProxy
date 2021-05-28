@@ -36,7 +36,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
-#include <sys/io.h>
+#include <sys/uio.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>

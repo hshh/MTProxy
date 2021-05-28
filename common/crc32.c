@@ -425,119 +425,6 @@ unsigned crc32_partial_generic (const void *data, long len, unsigned crc) {
 //mu(65-bit): 01001110000111110010001100110110000010111001010010110001111010101
 #define CRC64_REFLECTED_MU   0x9c3e466c172963d5ll
 
-static const char mask[64] __attribute__ ((aligned (64))) = {
-  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-  0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
-  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-};
-
-static const v2di CRC32_K256 = { CRC32_REFLECTED_X319, CRC32_REFLECTED_X255 };
-static const v2di CRC32_K128 = { CRC32_REFLECTED_X191, CRC32_REFLECTED_X127 };
-static const v2di CRC32_K64  = { CRC32_REFLECTED_X95, CRC32_REFLECTED_X63 };
-#ifndef CRC32_BARRETT_REDUCTION
-static const v2di CRC32_MU __attribute__ ((unused));
-#endif
-static const v2di CRC32_MU   = { CRC32_REFLECTED_MU, CRC32_REFLECTED_POLY_33_BIT };
-static const v2di CRC64_K256 = { CRC64_REFLECTED_X319, CRC64_REFLECTED_X255 };
-static const v2di CRC64_K128 = { CRC64_REFLECTED_X191, CRC64_REFLECTED_X127 };
-static const v2di CRC64_MU   = { CRC64_REFLECTED_MU, CRC64_REFLECTED_POLY_65_BIT };
-
-static v2di crcXX_partial_clmul (const void *q, long len, v2di D, v2di E, v2di K256, v2di K128) __attribute__((aligned(32)));
-v2di crcXX_partial_clmul (const void *q, long len, v2di D, v2di E, v2di K256, v2di K128) {
-  v2di G, H;
-  if (len >= 32) {
-    const void *e = ((const char *) q) + (len & -32l);
-    do {
-      G = *((v2di *) q);
-      H = *((v2di *) (q + 16));
-      G ^= __builtin_ia32_pclmulqdq128 (D, K256, 0x00);
-      H ^= __builtin_ia32_pclmulqdq128 (E, K256, 0x00);
-      D = __builtin_ia32_pclmulqdq128 (D, K256, 0x11);
-      E = __builtin_ia32_pclmulqdq128 (E, K256, 0x11);
-      D ^= G;
-      E ^= H;
-      q += 32;
-    } while (q != e);
-  }
-
-  if (len & 16) {
-    G = __builtin_ia32_pclmulqdq128 (D, K256, 0x00);
-    H = __builtin_ia32_pclmulqdq128 (E, K128, 0x00);
-    D = __builtin_ia32_pclmulqdq128 (D, K256, 0x11);
-    E = __builtin_ia32_pclmulqdq128 (E, K128, 0x11);
-    D ^= *((v2di *) q) ^ G ^ H ^ E;
-    q += 16;
-  } else {
-    G = __builtin_ia32_pclmulqdq128 (D, K128, 0x00);
-    D = __builtin_ia32_pclmulqdq128 (D, K128, 0x11);
-    D ^= G ^ E;
-  }
-
-  if ((len &= 15)) {
-    E = (v2di) __builtin_ia32_pshufb128 ( (v16qi) D, __builtin_ia32_loaddqu (mask + 32 + len));
-    H = (v2di) __builtin_ia32_loaddqu (mask + 16 + len);
-    D = (v2di) __builtin_ia32_pshufb128 ( (v16qi) D, (v16qi) H);
-    E ^= (v2di) __builtin_ia32_pshufb128 (*((v16qi *) q), (v16qi) H);
-    G = __builtin_ia32_pclmulqdq128 (D, K128, 0x00);
-    D = __builtin_ia32_pclmulqdq128 (D, K128, 0x11);
-    D ^= G ^ E;
-  }
-  return D;
-}
-
-unsigned crc32_partial_clmul (const void *data, long len, unsigned crc) {
-  if (len < 40) {
-    return crc32_partial_generic (data, len, crc);
-  }
-
-  /* works only for len >= 32 */
-  const char *q = (const char *) (((uintptr_t) data) & -16L);
-  int o = (int)(32 - ((uintptr_t) data & 15));
-
-  v2di D = (* (v2di *) q), E = (*(v2di *)(q + 16)), G, H;
-
-  {
-    v2di C;
-    FASTMOV_RMI32_TO_SSE(C, crc);
-    asm volatile ("pcmpeqw %0, %0\n\t" : "=x" (G)); //G := 2 ^ 128 - 1
-
-    H = (v2di) __builtin_ia32_loaddqu (mask + o);
-    G = (v2di) __builtin_ia32_pshufb128 ((v16qi) G, (v16qi) H );
-    D ^= (v2di) __builtin_ia32_pshufb128 ((v16qi) C, (v16qi) H );
-    D &= G;
-
-    if (__builtin_expect (o <= 19, 0)) {
-      E ^= (v2di) __builtin_ia32_pshufb128 ((v16qi) C, (v16qi) __builtin_ia32_loaddqu (mask + 16 + o));
-    }
-  }
-
-  len -= o;
-  q += 32;
-
-  D = crcXX_partial_clmul (q, len, D, E, CRC32_K256, CRC32_K128);
-
-  D =  __builtin_ia32_pslldqi128 (__builtin_ia32_psrldqi128 (D, 64), 32) ^ (v2di) __builtin_ia32_pclmulqdq128 (D, CRC32_K64, 0x00);
-
-  D ^= (v2di) __builtin_ia32_pclmulqdq128 (D, CRC32_K64, 0x10);
-
-  unsigned lo, hi;
-#ifdef CRC32_BARRETT_REDUCTION
-  H = (v2di) __builtin_ia32_punpckhdq128 ((v4si) (G ^ G), (v4si) D);
-  H = (v2di) __builtin_ia32_pclmulqdq128 (H, CRC32_MU, 0x00);
-  H = (v2di) __builtin_ia32_pclmulqdq128 (H, CRC32_MU, 0x10);
-  D ^= __builtin_ia32_pslldqi128 (H, 32);
-  D = __builtin_ia32_punpckhqdq128 (D, D);
-
-  FASTMOV_SSE_TO_LO_HI_DW(D, lo, hi);
-  return hi;
-#else
-  D = __builtin_ia32_punpckhqdq128 (D, D);
-  FASTMOV_SSE_TO_LO_HI_DW(D, lo, hi);
-  return crc32_table0[lo & 0xff] ^ crc32_table1[(lo & 0xff00) >> 8] ^ crc32_table2[(lo & 0xff0000) >> 16] ^ crc32_table[lo >> 24] ^ ((unsigned) hi);
-#endif
-}
-
 /******************** CRC-64 ********************/
 
 static const uint64_t crc64_table[256] = {
@@ -620,49 +507,6 @@ uint64_t crc64_partial_one_table (const void *data, long len, uint64_t crc) {
     crc = crc64_table[(crc ^ *p++) & 0xff] ^ (crc >> 8);
   }
   return crc;
-}
-
-static uint64_t crc64_barrett_reduction (v2di D) {
-  /* After reflection mu constant is 64 bit */
-  v2di E =  __builtin_ia32_pclmulqdq128 (D, CRC64_MU, 0x00);
-  /* The carry-less multiplication has to be performed with a PCLMULQDQ and an XOR operation
-     since P(x) is 65 bit constant. */
-  D ^= __builtin_ia32_pclmulqdq128 (E, CRC64_MU, 0x10);
-  D = __builtin_ia32_punpckhqdq128 (D, D);
-  D ^= E;
-  RETURN_SSE_UINT64(D);
-}
-
-uint64_t crc64_partial_clmul (const void *data, long len, uint64_t crc) {
-  if (len <= 31) {
-    return crc64_partial_one_table (data, len, crc);
-  }
-
-  /* works only for len >= 32 */
-  const char *q = (const char *) (((uintptr_t) data) & -16L);
-  int o = (int)(32 - ((uintptr_t) data & 15));
-
-  v2di D = (* (v2di *) q), E = (*(v2di *)(q + 16)), C, G, H;
-  FASTMOV_RMI64_TO_SSE(C, crc);
-  asm volatile ("pcmpeqw %0, %0\n\t" : "=x" (G)); //G := 2 ^ 128 - 1
-
-  H = (v2di) __builtin_ia32_loaddqu (mask + o);
-  G = (v2di) __builtin_ia32_pshufb128 ((v16qi) G, (v16qi) H );
-  D ^= (v2di) __builtin_ia32_pshufb128 ((v16qi) C, (v16qi) H );
-  D &= G;
-
-  if (o <= (32 - 9)) {
-    E ^= (v2di) __builtin_ia32_pshufb128 ((v16qi) C, (v16qi) __builtin_ia32_loaddqu (mask + 16 + o));
-  }
-
-  len -= o;
-  q += 32;
-
-  D = crcXX_partial_clmul (q, len, D, E, CRC64_K256, CRC64_K128);
-
-  D = (v2di) __builtin_ia32_pclmulqdq128 (CRC64_K128, D, 0x01) ^ __builtin_ia32_psrldqi128 (D, 64);
-
-  return crc64_barrett_reduction (D);
 }
 
 /* {{{ GF-32 */
@@ -756,31 +600,6 @@ unsigned gf32_combine_generic (unsigned *powers, unsigned crc1, int64_t len2) {
   return crc1;
 }
 
-uint64_t gf32_combine_clmul (unsigned *powers, unsigned crc1, int64_t len2) {
-  v2di D;
-  FASTMOV_RMI32_TO_SSE(D, crc1);
-  D = __builtin_ia32_pslldqi128 (D, 96);
-
-  int n = __builtin_ffsll (len2);
-  unsigned int *p = powers + (4 * (n - 1));
-  len2 >>= n;
-
-  D = __builtin_ia32_pclmulqdq128 ( * ((v2di *) p), D, 0x11);
-
-  while (len2) {
-    p += 4;
-    if (len2 & 1) {
-      v2di E = *((v2di *) p);
-      D = __builtin_ia32_pclmulqdq128 (E, D, 0x11) ^ __builtin_ia32_pclmulqdq128 (E, D, 0x00);
-    }
-    len2 >>= 1;
-  }
-
-  D ^= (v2di) __builtin_ia32_pclmulqdq128 (* ((v2di *) (powers + 12)), D, 0x01);
-  D = __builtin_ia32_punpckhqdq128 (D, D);
-  RETURN_SSE_UINT64(D);
-}
-
 /* }}} */
 
 static unsigned compute_crc32_combine_generic (unsigned crc1, unsigned crc2, int64_t len2) {
@@ -796,31 +615,6 @@ static unsigned compute_crc32_combine_generic (unsigned crc1, unsigned crc2, int
   }
   return gf32_combine_generic (crc32_powers, crc1, len2) ^ crc2;
   #undef N
-}
-
-static unsigned compute_crc32_combine_clmul (unsigned crc1, unsigned crc2, int64_t len2) {
-  static unsigned int crc32_powers[252] __attribute__ ((aligned(16)));
-  if (len2 <= 0) {
-    return crc1;
-  }
-  unsigned int *p;
-  if (!crc32_powers[251]) {
-    gf32_compute_powers_clmul (crc32_powers, CRC32_REFLECTED_POLY);
-    p = crc32_powers + 8;
-    assert ( *((uint64_t *) (p + 0)) == CRC32_REFLECTED_X95);
-    assert ( *((uint64_t *) (p + 4)) == CRC32_REFLECTED_X127);
-    assert ( *((uint64_t *) (p + 6)) == CRC32_REFLECTED_X63);
-    assert ( *((uint64_t *) (p + 8)) == CRC32_REFLECTED_X191);
-    assert ( *((uint64_t *) (p + 10)) == CRC32_REFLECTED_X127);
-    assert ( *((uint64_t *) (p + 12)) == CRC32_REFLECTED_X319);
-    assert ( *((uint64_t *) (p + 14)) == CRC32_REFLECTED_X255);
-    assert (crc32_powers[251]);
-  }
-
-  uint64_t T = gf32_combine_clmul (crc32_powers, crc1, len2);
-  crc1 = (unsigned) T;
-  crc2 ^= (unsigned) (T >> 32);
-  return (crc32_table0[crc1 & 0xff] ^ crc32_table1[(crc1 & 0xff00) >> 8] ^ crc32_table2[(crc1 & 0xff0000) >> 16] ^ crc32_table[crc1 >> 24]) ^ crc2;
 }
 
 /******************** GF-64 (reversed) ********************/
@@ -872,34 +666,6 @@ void crc64_init_power_buf (void) {
   assert (p[10] == CRC64_REFLECTED_X319);
   assert (p[11] == CRC64_REFLECTED_X255);
   assert (crc64_power_buf[125]);
-}
-
-static uint64_t compute_crc64_combine_clmul (uint64_t crc1, uint64_t crc2, int64_t len2) {
-  if (len2 <= 0) {
-    return crc1;
-  }
-  if (!crc64_power_buf[125]) {
-    crc64_init_power_buf ();
-  }
-  v2di D;
-  FASTMOV_RMI64_TO_SSE(D, crc1);
-  D = __builtin_ia32_pslldqi128 (D, 64);
-
-  int n = __builtin_ffsll (len2);
-  uint64_t *p = crc64_power_buf + (2 * (n - 1));
-  len2 >>= n;
-
-  D = __builtin_ia32_pclmulqdq128 ( * ((v2di *) p), D, 0x11);
-
-  while (len2) {
-    p += 2;
-    if (len2 & 1) {
-      v2di E = *((v2di *) p);
-      D = __builtin_ia32_pclmulqdq128 (E, D, 0x11) ^ __builtin_ia32_pclmulqdq128 (E, D, 0x00);
-    }
-    len2 >>= 1;
-  }
-  return crc64_barrett_reduction (D) ^ crc2;
 }
 
 static uint64_t compute_crc64_combine_generic (uint64_t crc1, uint64_t crc2, int64_t len2) {
@@ -1035,16 +801,8 @@ int crc32_check_and_repair (void *input, int l, unsigned *input_crc32, int force
 
 static void crc32_init (void) __attribute__ ((constructor));
 void crc32_init (void) {
-  kdb_cpuid_t *p = kdb_cpuid ();
-  if (p->ecx & 2) {
-    crc32_partial = crc32_partial_clmul;
-    crc64_partial = crc64_partial_clmul;
-    compute_crc32_combine = compute_crc32_combine_clmul;
-    compute_crc64_combine = compute_crc64_combine_clmul;
-  } else {
     crc32_partial = crc32_partial_generic;
     crc64_partial = crc64_partial_one_table;
     compute_crc32_combine = compute_crc32_combine_generic;
     compute_crc64_combine = compute_crc64_combine_generic;
-  }
 }
